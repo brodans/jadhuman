@@ -1,0 +1,28 @@
+{
+  "name": "Jadhuman Panel",
+  "short_name": "Jadhuman",
+  "description": "Jaringan Administrasi dan Manajemen Absensi",
+  "start_url": "/",
+  "scope": "/",
+  "id": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "categories": ["business", "utilities"],
+  "lang": "id",
+  "icons": [
+    {
+      "src": "/assets/jadhuman.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/jadhuman.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
