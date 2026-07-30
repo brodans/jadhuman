@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="id" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport: user-scalable=no mencegah zoom yang merusak layout, tapi masih aksesibel -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
+    <title>JADHUMAN Web Panel</title>
+
+    <!-- ─── Favicon ─────────────────────────────────────── -->
+    <link rel="shortcut icon" href="/assets/favicon.ico" type="image/x-icon" />
+    <link rel="icon" type="image/svg+xml" href="/assets/jadhuman.svg" />
+
+    <!-- ─── PWA Manifest ────────────────────────────────── -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- ─── Theme color (diupdate oleh JS saat toggle dark mode) ── -->
+    <meta name="theme-color" id="theme-color-meta" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)"  content="#020617" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+
+    <!-- ─── iOS / Apple PWA ─────────────────────────────── -->
+    <!-- apple-touch-icon: ikon saat "Add to Home Screen" di iOS -->
+    <link rel="apple-touch-icon" href="/assets/jadhuman.svg" />
+    <!-- Aktifkan mode standalone di iOS (tidak ada browser chrome) -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- Status bar style: default=putih, black=hitam, black-translucent=transparan -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!-- Judul yang tampil di layar Home iOS -->
+    <meta name="apple-mobile-web-app-title" content="Jadhuman" />
+
+    <!-- ─── Android / General PWA ───────────────────────── -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="Jadhuman" />
+
+    <!-- ─── SEO / Social ────────────────────────────────── -->
+    <meta name="description" content="Jaringan Administrasi dan Manajemen Absensi - Panel Web" />
+    <meta name="robots" content="noindex, nofollow" />
+
+    <!-- ─── Google Fonts ────────────────────────────────── -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <!-- Prevent flash of white before React mounts -->
+    <script>
+      (function() {
+        try {
+          var theme = localStorage.getItem('theme');
+          var dark = theme === 'dark' || (!theme && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.classList.toggle('dark', dark);
+          document.body.style.background = dark ? '#020617' : '#f1f5f9';
+          // Sync theme-color meta dengan tema
+          var metaTheme = document.getElementById('theme-color-meta');
+          if (metaTheme) metaTheme.setAttribute('content', dark ? '#020617' : '#ffffff');
+        } catch(e) {}
+      })();
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

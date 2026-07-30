@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-slate-850: #162032;
+}
+
+@layer base {
+  body {
+    font-family: 'Inter', sans-serif;
+  }
+}
+
+/* Custom scrollbars - apply to EVERYTHING by default for ultimate sleek consistency */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1;
+    border-radius: 10px;
+}
+.dark ::-webkit-scrollbar-thumb {
+    background-color: #475569;
+}
+::-webkit-scrollbar-thumb:hover {
+    background-color: #94a3b8;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+    background-color: #64748b;
+}
+
+/* Support Firefox thin scrollbars globally */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+}
+.dark * {
+    scrollbar-color: #475569 transparent;
+}
+
+/* Backward compatibility classes */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1;
+    border-radius: 10px;
+}
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: #475569;
+}
+.custom-scrollbar:hover::-webkit-scrollbar-thumb {
+    background-color: #94a3b8;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+.hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+/* Loader animation */
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+.animate-spin-slow {
+    animation: spin 3s linear infinite;
+}
+
+/* Transitions */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes popIn {
+    0% { opacity: 0; transform: scale(0.9); }
+    50% { opacity: 1; transform: scale(1.05); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+.animate-pop-in {
+    animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Input file custom styling for import excel */
+input[type="file"].custom-file-input::-webkit-file-upload-button {
+    visibility: hidden;
+}
+input[type="file"].custom-file-input::before {
+    content: 'Pilih File Excel';
+    display: inline-block;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    outline: none;
+    white-space: nowrap;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.875rem;
+}
+input[type="file"].custom-file-input:hover::before {
+    background: #1d4ed8;
+}
