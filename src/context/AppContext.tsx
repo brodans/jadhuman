@@ -1,9 +1,14 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 import { getTodayWIB } from '../lib/dateFormatter';
 import type { UserRole, TabPermissions, UserAccountSafe } from '../lib/userManager';
-import { DEFAULT_ADMIN_PERMISSIONS } from '../lib/userManager';
+import { DEFAULT_ADMIN_PERMISSIONS, DEFAULT_USER_PERMISSIONS } from '../lib/userManager';
 import { clearServerLoginCache } from '../lib/cacheManager';
-import { loadSession, saveSession, clearSession } from '../lib/sessionManager';
+import {
+  loadSession,
+  loadSessionSync,
+  saveSession,
+  clearAllSessions,
+} from '../lib/sessionManager';
 
 export interface InstansiLogState {
   dateStart: string;
@@ -73,32 +78,104 @@ interface AppContextType {
   setTabPermissions: (perms: TabPermissions) => void;
   // Trigger auto-login ke server pusat setelah login akun Jadhuman
   autoLoginTrigger: number;
+  // Flag: apakah session sudah diverifikasi HMAC (async) — hindari render sensitif sebelum ini
+  sessionVerified: boolean;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+// ─── Blank / safe default permissions (unauthenticated state) ───────────────
+// PENTING: default BUKAN DEFAULT_ADMIN_PERMISSIONS.
+// Jika currentUser null (belum login), tidak ada hak akses apapun.
+const UNAUTHENTICATED_PERMISSIONS: TabPermissions = {
+  ...DEFAULT_USER_PERMISSIONS,
+  tabLogin:  false,
+  tabAbsen:  false,
+  tabNotifikasi: false,
+};
+
 export function AppProvider({ children }: { children: ReactNode }) {
-  // Inisialisasi sesi aktif dari sessionStorage (terisolasi per-tab)
-  const initialSession = loadSession();
+  // ── Inisialisasi SINKRON dari sessionStorage (cepat, tanpa await) ─────────
+  // Verifikasi HMAC penuh dilakukan async sesaat setelah mount (lihat useEffect di bawah).
+  // Ini mencegah flicker / blank screen sambil tetap aman.
+  const initialSession = loadSessionSync();
 
   const [currentUser, setCurrentUserState] = useState<UserAccountSafe | null>(() => {
     return initialSession ? initialSession.currentUser : null;
   });
   const currentUserRef = React.useRef<UserAccountSafe | null>(currentUser);
+
+  // ⚠️ SECURITY: default tabPermissions HARUS menggunakan UNAUTHENTICATED_PERMISSIONS
+  // (semua false) saat currentUser = null, bukan DEFAULT_ADMIN_PERMISSIONS.
+  // Jika ada session, restore dari storage — tapi HANYA setelah sessionVerified = true.
   const [tabPermissions, setTabPermissionsState] = useState<TabPermissions>(() => {
-    return initialSession ? initialSession.tabPermissions : DEFAULT_ADMIN_PERMISSIONS;
+    if (!initialSession) return UNAUTHENTICATED_PERMISSIONS;
+    return initialSession.tabPermissions;
   });
-  // Counter yang di-increment setiap login Jadhuman berhasil → TabLogin watch ini untuk trigger auto-login
+
+  // Flag: apakah session sudah melewati verifikasi HMAC penuh (async)
+  // Sebelum verified, komponen sensitif sebaiknya tidak dirender
+  const [sessionVerified, setSessionVerified] = useState<boolean>(false);
+
+  /**
+   * autoLoginTrigger: Counter yang di-increment setiap login Jadhuman berhasil.
+   * TabLogin & MainApp watch ini untuk trigger auto-login ke server pusat.
+   *
+   * PENTING: Dimulai dari 0 agar TIDAK trigger runAutoLogin saat refresh/restore session.
+   * runAutoLogin hanya boleh jalan saat nilai ini berubah (increment via setCurrentUser).
+   * lastHandledAutoLogin ref di MainApp dimulai dari 0 (sama), sehingga kondisi
+   * `lastHandledAutoLogin.current === autoLoginTrigger` → TRUE → skip saat pertama mount.
+   */
   const [autoLoginTrigger, setAutoLoginTrigger] = useState(0);
 
-  // ⚠️ SECURITY: jika currentUser null (unauthenticated), userRole HARUS 'user' (bukan 'admin')!
+  // ⚠️ SECURITY: jika currentUser null (unauthenticated), userRole HARUS 'user'
   const userRole: UserRole = currentUser?.role ?? 'user';
 
-  // Simpan referensi ke currentUser yang bisa dibaca secara sinkron
-  // (dipakai untuk cache invalidation saat ganti akun)
+  // Simpan referensi sinkron ke currentUser (dipakai saat ganti akun)
   React.useEffect(() => {
     currentUserRef.current = currentUser;
   }, [currentUser]);
+
+  // ── Verifikasi HMAC async setelah mount ──────────────────────────────────
+  // loadSession() (async) melakukan 6 lapis validasi termasuk HMAC.
+  // Jika gagal → paksa logout / invalidasi session.
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const verifySessionIntegrity = async () => {
+      // Jika tidak ada sesi sinkron, tidak perlu verifikasi
+      if (!initialSession) {
+        if (!cancelled) setSessionVerified(true);
+        return;
+      }
+
+      try {
+        const verified = await loadSession();
+        if (cancelled) return;
+
+        if (!verified) {
+          // Session tidak lulus verifikasi HMAC atau validasi lain → reset state
+          console.warn('[AppContext] Session gagal verifikasi integrity — paksa re-login');
+          clearAllSessions();
+          setCurrentUserState(null);
+          setTabPermissionsState(UNAUTHENTICATED_PERMISSIONS);
+          // App.tsx akan mendeteksi ini via checkSession() dan redirect ke login
+        }
+      } catch {
+        if (!cancelled) {
+          clearAllSessions();
+          setCurrentUserState(null);
+          setTabPermissionsState(UNAUTHENTICATED_PERMISSIONS);
+        }
+      } finally {
+        if (!cancelled) setSessionVerified(true);
+      }
+    };
+
+    verifySessionIntegrity();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [pegawai, setPegawaiState] = useState<PegawaiData | null>(null);
 
@@ -118,11 +195,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
   };
 
-  // setCurrentUser: saat dipanggil setelah login, simpan ke sessionStorage dan trigger auto-login
+  const [configState, setConfigState] = useState<KredensialConfig>({
+    idPegawai: '',
+    deviceId: '',
+    latitude: '',
+    longitude: '',
+    idLokasi: '',
+    kodeInstansi: '',
+    kodeUnor: '',
+    workMode: '1',
+    versi: '2.0.0'
+  });
+
+  const setConfig: React.Dispatch<React.SetStateAction<KredensialConfig>> = (value) => {
+    setConfigState((prev: any) => {
+      const next = typeof value === 'function' ? (value as any)(prev) : value;
+      return next;
+    });
+  };
+
+  // ── setCurrentUser: dipanggil saat login berhasil atau logout ─────────────
   const setCurrentUser = (user: UserAccountSafe | null) => {
     if (!user) {
-      // Logout — bersihkan sesi tab ini dari sessionStorage & memory
-      clearSession();
+      // Logout — bersihkan semua data sensitif dari memory & storage
+      clearAllSessions();
       setPegawaiState(null);
       setLoginFormState({ username: '', password: '' });
       setConfigState({
@@ -130,18 +226,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
         idLokasi: '', kodeInstansi: '', kodeUnor: '', workMode: '1', versi: '2.0.0'
       });
       setCurrentUserState(null);
-      setTabPermissionsState(DEFAULT_ADMIN_PERMISSIONS);
+      // ⚠️ Saat logout, WAJIB reset ke UNAUTHENTICATED (bukan DEFAULT_ADMIN_PERMISSIONS!)
+      setTabPermissionsState(UNAUTHENTICATED_PERMISSIONS);
       return;
     }
 
     // Ganti akun: hapus cache server akun sebelumnya agar tidak bocor ke akun baru
-    const prevUsername = currentUserRef.current?.username ?? 'default_admin';
-    const nextUsername = user.username ?? 'default_admin';
-    if (prevUsername !== nextUsername) {
+    const prevUsername = currentUserRef.current?.username ?? '';
+    const nextUsername = user.username ?? '';
+    if (prevUsername && prevUsername !== nextUsername) {
       clearServerLoginCache(prevUsername);
     }
 
-    // Reset data server pusat dulu (akan diisi ulang oleh auto-login dari Firestore)
+    // Reset data server pusat (akan diisi ulang oleh auto-login dari Firestore)
     setPegawaiState(null);
     setLoginFormState({ username: '', password: '' });
     setConfigState({
@@ -149,20 +246,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
       idLokasi: '', kodeInstansi: '', kodeUnor: '', workMode: '1', versi: '2.0.0'
     });
 
-    const perms = user.permissions || DEFAULT_ADMIN_PERMISSIONS;
+    // Tentukan permissions: admin selalu dapat FULL, user dari data Firestore
+    const perms: TabPermissions =
+      user.role === 'admin'
+        ? DEFAULT_ADMIN_PERMISSIONS
+        : (user.permissions || DEFAULT_USER_PERMISSIONS);
+
     setCurrentUserState(user);
     setTabPermissionsState(perms);
-    saveSession(user, perms);
+    // saveSession sekarang async — fire-and-forget (error diabaikan, UI tidak perlu tunggu)
+    saveSession(user, perms).catch(err =>
+      console.warn('[AppContext] saveSession error:', err)
+    );
     setAutoLoginTrigger(prev => prev + 1);
   };
 
   const setTabPermissions = (perms: TabPermissions) => {
     setTabPermissionsState(perms);
     if (currentUser) {
-      saveSession(currentUser, perms);
+      saveSession(currentUser, perms).catch(err =>
+        console.warn('[AppContext] saveSession error:', err)
+      );
     }
   };
-  
+
   const PATH_MAP: Record<string, string> = {
     'tabLogin': '/login-info',
     'tabAbsen': '/submit-presensi',
@@ -210,7 +317,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     window.addEventListener('popstate', handleLocationChange);
     return () => window.removeEventListener('popstate', handleLocationChange);
   }, []);
-  
+
   const [developerMode, setDeveloperModeState] = useState<boolean>(() => {
     return localStorage.getItem('developerMode') === 'true';
   });
@@ -228,25 +335,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setDatePickerStyle = (val: 'modern' | 'klasik') => {
     setDatePickerStyleState(val);
     localStorage.setItem('datePickerStyle', val);
-  };
-  
-  const [config, setConfigState] = useState<KredensialConfig>({
-    idPegawai: '',
-    deviceId: '',
-    latitude: '',
-    longitude: '',
-    idLokasi: '',
-    kodeInstansi: '',
-    kodeUnor: '',
-    workMode: '1',
-    versi: '2.0.0'
-  });
-
-  const setConfig: React.Dispatch<React.SetStateAction<KredensialConfig>> = (value) => {
-    setConfigState((prev: any) => {
-      const next = typeof value === 'function' ? (value as any)(prev) : value;
-      return next;
-    });
   };
 
   const [instansiLogState, setInstansiLogState] = useState<InstansiLogState>(() => {
@@ -268,32 +356,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Sync default unorCode with config on load
   React.useEffect(() => {
-    if (config.kodeInstansi || config.kodeUnor) {
+    if (configState.kodeInstansi || configState.kodeUnor) {
       setInstansiLogState(prev => {
         if (!prev.hasLoadedOnce && !prev.unorCode) {
           return {
             ...prev,
-            unorCode: config.kodeInstansi || config.kodeUnor || '5.19.00.00.00'
+            unorCode: configState.kodeInstansi || configState.kodeUnor || '5.19.00.00.00'
           };
         }
         return prev;
       });
     }
-  }, [config.kodeInstansi, config.kodeUnor]);
+  }, [configState.kodeInstansi, configState.kodeUnor]);
 
   return (
-    <AppContext.Provider value={{ 
-      pegawai, 
-      setPegawai, 
-      config, 
-      setConfig, 
-      loginForm, 
-      setLoginForm, 
-      developerMode, 
-      setDeveloperMode, 
-      datePickerStyle, 
-      setDatePickerStyle, 
-      activeTab, 
+    <AppContext.Provider value={{
+      pegawai,
+      setPegawai,
+      config: configState,
+      setConfig,
+      loginForm,
+      setLoginForm,
+      developerMode,
+      setDeveloperMode,
+      datePickerStyle,
+      setDatePickerStyle,
+      activeTab,
       setActiveTab,
       instansiLogState,
       setInstansiLogState,
@@ -303,6 +391,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       tabPermissions,
       setTabPermissions,
       autoLoginTrigger,
+      sessionVerified,
     }}>
       {children}
     </AppContext.Provider>

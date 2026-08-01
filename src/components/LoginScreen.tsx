@@ -10,7 +10,7 @@ import { doc, getDoc } from 'firebase/firestore';
 import { verifyUserPassword, sanitizeString, DEFAULT_ADMIN_PERMISSIONS } from '../lib/userManager';
 import type { UserAccountSafe, TabPermissions } from '../lib/userManager';
 import { useAppContext } from '../context/AppContext';
-import { createAdminUserAccount, saveSession } from '../lib/sessionManager';
+import { createAdminUserAccount, clearSessionByRole } from '../lib/sessionManager';
 import {
   getSubscription, isSubscriptionActive, checkAndAutoExpire,
   formatRp, type UserSubscription,
@@ -235,9 +235,15 @@ export default function LoginScreen({ onLogin, isDarkMode, toggleDarkMode }: Log
       if (authenticated && loginAsUser) {
         localStorage.setItem(LS_ATTEMPTS, '0');
         localStorage.removeItem(LS_COOLDOWN);
+
+        // ── SECURITY: Invalidate session role LAIN sebelum simpan session baru ──
+        // Cegah stale admin session saat login sebagai user atau sebaliknya.
+        const oppositeRole = loginAsUser.role === 'admin' ? 'user' : 'admin';
+        clearSessionByRole(oppositeRole);
+
+        // setCurrentUser sudah memanggil saveSession + clearSessionByRole internal
         setCurrentUser(loginAsUser);
         setTabPermissions(loginPermissions);
-        saveSession(loginAsUser, loginPermissions);
         dispatch({ type: 'AUTH_SUCCESS' });
 
         // ── Gate payment: cek subscription untuk non-admin ────────────────

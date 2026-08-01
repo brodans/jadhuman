@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from 'motion/react';
 import { LogIn, Camera, FileText, Activity, FileCheck, Database, Menu, Moon, Sun, UserCircle, ChevronLeft, ChevronRight, LogOut, X, Edit3, BarChart3, Building2, MapPin } from 'lucide-react';
 import { useDarkMode } from './hooks/useDarkMode';
 import { AppProvider, useAppContext } from './context/AppContext';
-import { DEFAULT_ADMIN_PERMISSIONS } from './lib/userManager';
 import TabLogin from './components/tabs/TabLogin';
 import TabAbsen from './components/tabs/TabAbsen';
 import TabLog from './components/tabs/TabLog';
@@ -22,7 +21,7 @@ import { doc, getDoc } from 'firebase/firestore';
 import { sendRequest } from './api';
 import { decryptPayload } from './lib/encryption';
 import { getServerLoginCache } from './lib/cacheManager';
-import { loadSession, touchSession, clearSession } from './lib/sessionManager';
+import { loadSessionSync, loadSession, touchSession, clearAllSessions } from './lib/sessionManager';
 import { getSubscription, checkAndAutoExpire, isSubscriptionActive } from './lib/subscription';
 
 const TABS = [
@@ -56,10 +55,16 @@ function Clock() {
 }
 
 function MainApp({ onLogout, isDarkMode, toggleDarkMode }: { onLogout: () => void, isDarkMode: boolean, toggleDarkMode: () => void }) {
-  const { pegawai, setPegawai, setConfig, setLoginForm, activeTab, setActiveTab, tabPermissions, currentUser, userRole, setCurrentUser, setTabPermissions, autoLoginTrigger } = useAppContext();
+  const { pegawai, setPegawai, setConfig, setLoginForm, activeTab, setActiveTab, tabPermissions, currentUser, userRole, setCurrentUser, autoLoginTrigger, sessionVerified } = useAppContext();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
   const [isPinModalOpen, setIsPinModalOpen] = useState(false);
+
+  // ── Logout: setCurrentUser(null) sudah clear semua data sensitif + reset permissions ke minimum
+  const handleLogout = () => {
+    setCurrentUser(null); // AppContext reset tabPermissions ke UNAUTHENTICATED (semua false)
+    onLogout();
+  };
 
   // Filter TABS berdasarkan permissions — admin selalu tampil semua
   // ⚠️ tabLogin selalu visible untuk semua user (enforced di code)
@@ -77,13 +82,6 @@ function MainApp({ onLogout, isDarkMode, toggleDarkMode }: { onLogout: () => voi
     }
   }, [pegawai, activeTab, setActiveTab]);
 
-  // Logout: setCurrentUser(null) sudah clear semua data sensitif dari memory
-  const handleLogout = () => {
-    setCurrentUser(null);
-    setTabPermissions(DEFAULT_ADMIN_PERMISSIONS);
-    onLogout();
-  };
-
   // Guard subscription check untuk non-admin pada session restore / mount
   React.useEffect(() => {
     if (userRole !== 'admin' && currentUser?.id) {
@@ -99,23 +97,41 @@ function MainApp({ onLogout, isDarkMode, toggleDarkMode }: { onLogout: () => voi
     }
   }, [currentUser, userRole]);
 
-  // ─── Auto-login ke server pusat setiap kali login akun Jadhuman ─────────
-  // Berjalan di level App (bukan hanya di TabLogin) agar langsung tembak
-  // doLogin ke server pusat tanpa perlu buka tab Login Info terlebih dahulu.
+  // ─── Auto-login ke server pusat HANYA saat login baru (bukan restore session) ─
   //
-  // Alur prioritas:
-  //   1. Cek cache localStorage → jika ada, pakai langsung (0ms, no network)
-  //   2. Jika tidak ada cache → baca Firestore → doLogin ke server
-  const lastHandledAutoLogin = React.useRef(-1);
+  // PENTING — 3 lapis guard mencegah race condition & cross-account data leak:
+  //
+  //   Guard 1: autoLoginTrigger === 0 → ini restore session saat refresh, SKIP.
+  //            autoLoginTrigger hanya > 0 setelah setCurrentUser() dipanggil
+  //            dari LoginScreen (login baru), bukan dari loadSessionSync() restore.
+  //
+  //   Guard 2: lastHandledAutoLogin.current dimulai dari 0 (bukan -1).
+  //            Sehingga saat mount pertama dengan autoLoginTrigger=0: 0===0 → skip.
+  //            Saat login baru increment jadi 1: 0!==1 → jalan.
+  //
+  //   Guard 3: Tunggu sessionVerified=true sebelum akses currentUser.
+  //            Mencegah race condition di mana currentUser masih null/stale
+  //            sehingga jadhumanUsername fallback ke 'default_admin' dan
+  //            load cache/data akun admin secara tidak sengaja.
+  //
+  const lastHandledAutoLogin = React.useRef(0);
   React.useEffect(() => {
+    // Guard 1 & 2: skip saat restore session (trigger masih 0 atau sudah dihandle)
+    if (autoLoginTrigger === 0) return;
     if (lastHandledAutoLogin.current === autoLoginTrigger) return;
     lastHandledAutoLogin.current = autoLoginTrigger;
+
+    // Guard 3: hanya jalan setelah session diverifikasi (HMAC async selesai)
+    if (!sessionVerified) return;
 
     const runAutoLogin = async () => {
       if (pegawai) return; // sudah ada data, skip
 
+      // Pastikan currentUser ada dan valid (bukan null dari race condition)
+      if (!currentUser || !currentUser.username) return;
+
       try {
-        const jadhumanUsername = currentUser?.username ?? 'default_admin';
+        const jadhumanUsername = currentUser.username;
 
         // ── Cek cache localStorage terlebih dahulu ──────────────────
         const cached = getServerLoginCache(jadhumanUsername);
@@ -187,7 +203,39 @@ function MainApp({ onLogout, isDarkMode, toggleDarkMode }: { onLogout: () => voi
 
     runAutoLogin();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoLoginTrigger]);
+  }, [autoLoginTrigger, sessionVerified]);
+
+  // ─── Restore data pegawai dari cache saat refresh (restore session) ──────
+  // Saat refresh: autoLoginTrigger=0 di-skip oleh useEffect di atas, tapi
+  // pegawai=null karena tidak disimpan di sessionStorage.
+  // useEffect ini mengisi pegawai dari cache localStorage berdasarkan
+  // currentUser.username yang sudah benar (setelah sessionVerified=true).
+  // KUNCI KEAMANAN: currentUser.username diambil dari session yang sudah
+  // diverifikasi → tidak mungkin fallback ke 'default_admin' lagi.
+  React.useEffect(() => {
+    if (!sessionVerified) return;          // tunggu HMAC verify selesai
+    if (!currentUser?.username) return;    // tidak ada session valid
+    if (autoLoginTrigger > 0) return;      // login baru sudah dihandle useEffect atas
+    if (pegawai) return;                   // data sudah ada
+
+    const jadhumanUsername = currentUser.username;
+    const cached = getServerLoginCache(jadhumanUsername);
+    if (cached && cached.serverUsername && cached.serverPassword) {
+      setLoginForm({ username: cached.serverUsername, password: cached.serverPassword });
+      setPegawai(cached.pegawai);
+      setConfig(prev => ({
+        ...prev,
+        idPegawai:    cached.config.idPegawai    || prev.idPegawai,
+        deviceId:     cached.config.deviceId     || prev.deviceId,
+        latitude:     cached.config.latitude     || prev.latitude,
+        longitude:    cached.config.longitude    || prev.longitude,
+        idLokasi:     cached.config.idLokasi     || prev.idLokasi,
+        kodeInstansi: cached.config.kodeInstansi || prev.kodeInstansi,
+        kodeUnor:     cached.config.kodeUnor     || prev.kodeUnor,
+      }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionVerified, currentUser]);
 
   // Custom back button handler for modals (PinModal, MobileMenu, Lightboxes)
   React.useEffect(() => {
@@ -244,6 +292,20 @@ function MainApp({ onLogout, isDarkMode, toggleDarkMode }: { onLogout: () => voi
     return found;
   })();
   const ActiveComponent = activeTabData.component;
+
+  // ── Guard: jangan render konten sensitif sebelum HMAC session diverifikasi ──
+  // sessionVerified = true dalam ~50-100ms (Web Crypto sangat cepat).
+  // Ini mencegah race condition di mana manipulasi sessionStorage belum terdeteksi.
+  if (!sessionVerified) {
+    return (
+      <div className="bg-slate-50 dark:bg-slate-900 h-[100dvh] w-full flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-slate-400 dark:text-slate-500">
+          <div className="w-6 h-6 border-2 border-slate-300 dark:border-slate-600 border-t-blue-500 rounded-full animate-spin" />
+          <span className="text-xs font-medium">Memverifikasi sesi...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-sans h-[100dvh] w-full flex transition-colors duration-300 overflow-hidden relative">
@@ -402,8 +464,13 @@ function MainApp({ onLogout, isDarkMode, toggleDarkMode }: { onLogout: () => voi
 
 export default function App() {
   const { isDarkMode, toggleDarkMode } = useDarkMode();
+
+  // ── Inisialisasi sinkron: cek ada tidaknya session dari storage ──────────
+  // loadSessionSync() tidak melakukan HMAC verify (sync), tapi AppContext akan
+  // melakukan verifikasi async segera setelah mount. Jika gagal, AppContext
+  // akan clear session → interval checkSession() di bawah akan mendeteksinya.
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    const session = loadSession();
+    const session = loadSessionSync();
     return !!session;
   });
 
@@ -421,13 +488,14 @@ export default function App() {
     setIsAuthenticated(true);
   };
 
-  const handleLogout = () => {
-    clearSession();
+  const handleLogout = React.useCallback(() => {
+    // Hapus SEMUA session (admin + user + legacy) dari tab ini
+    clearAllSessions();
     setIsAuthenticated(false);
     if (typeof window !== 'undefined') {
       window.history.replaceState(null, '', '/login');
     }
-  };
+  }, []);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -444,28 +512,29 @@ export default function App() {
     }
   }, [isAuthenticated, redirectPath]);
 
-  // Handle active session tracking and timeout
+  // ── Session tracking & timeout ───────────────────────────────────────────
   React.useEffect(() => {
     if (!isAuthenticated || typeof window === 'undefined') return;
 
-    const checkSession = () => {
-      const session = loadSession();
+    // checkSession: verifikasi PENUH termasuk HMAC (async) setiap 10 detik
+    const checkSession = async () => {
+      const session = await loadSession();
       if (!session) {
+        // Session expired, tampered, atau role mismatch → paksa logout
         handleLogout();
       }
     };
 
+    // touchSession sekarang async — fire-and-forget
     const resetSessionTimer = () => {
-      touchSession();
+      touchSession().catch(() => {/* ignore */});
     };
 
-    // Events signaling user activity to refresh session
     const activityEvents = ['mousedown', 'keydown', 'scroll', 'touchstart', 'click'];
     activityEvents.forEach(event => {
       window.addEventListener(event, resetSessionTimer);
     });
 
-    // Check every 10 seconds if idle for 10 minutes
     const interval = setInterval(checkSession, 10000);
 
     return () => {
@@ -474,7 +543,7 @@ export default function App() {
       });
       clearInterval(interval);
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, handleLogout]);
 
   return (
     <AppProvider>
